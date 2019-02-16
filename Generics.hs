@@ -26,52 +26,19 @@ data Tree a =
   | One a
   | Join (Tree a) (Tree a)
 
-class IsTree t where
-  cataTree ::
-       r None
-    -> (forall a . r (One a))
-    -> (forall t1 t2 . (IsTree t1, IsTree t2) => r t1 -> r t2 -> r (Join t1 t2))
-    -> r t
-
-class AsTree c xs where
-  viewTree ::
-       Proxy c
-    -> r '[]
-    -> (forall a . c a => r '[a])
-    -> (forall ys zs rs . (AsTree c ys, AsTree c zs, Split rs rs ~ '(ys, zs)) => r ys -> r zs -> r rs)
-    -> r xs
-
-instance IsTree None where
-  cataTree none _one _join = none
-
-instance AsTree c '[] where
-  viewTree _p none _one _join = none
-
-instance IsTree (One a) where
-  cataTree _none one _join = one
-
-instance c a => AsTree c '[a] where
-  viewTree _p _none one _join = one
-
-instance (IsTree t1, IsTree t2) => IsTree (Join t1 t2) where
-  cataTree none one join =
-    join (cataTree none one join) (cataTree none one join)
-
-instance (AsTree c ys, AsTree c zs, Split (x1 : x2 : xs) (x1 : x2 : xs) ~ '(ys, zs)) => AsTree c (x1 : x2 : xs) where
-  viewTree p none one join =
-    join (viewTree p none one join) (viewTree p none one join)
-
 type family ToTree (xs :: [a]) :: Tree a where
   ToTree '[]  = None
   ToTree '[a] = One a
-  ToTree xs   = Join' (Split xs xs)
+  ToTree xs   = JoinToTree (Split xs)
 
-type family Join' (pair :: ([a], [a])) :: Tree a where
-  Join' '(xs, ys) = Join (ToTree xs) (ToTree ys)
+type family JoinToTree (pair :: ([a], [a])) :: Tree a where
+  JoinToTree '(xs, ys) = Join (ToTree xs) (ToTree ys)
 
-type family Split (single :: [a]) (double :: [a]) :: ([a], [a]) where
-  Split (x : xs) (_ : _ : ys) = AddFst x (Split xs ys)
-  Split xs       _            = '( '[], xs)
+type Split (xs :: [a]) = SplitAux xs xs
+
+type family SplitAux (single :: [a]) (double :: [a]) :: ([a], [a]) where
+  SplitAux (x : xs) (_ : _ : ys) = AddFst x (SplitAux xs ys)
+  SplitAux xs       _            = '( '[], xs)
 
 type family AddFst (x :: a) (pair :: ([a], [a])) :: ([a], [a]) where
   AddFst x p = '(x : Fst p, Snd p)
@@ -84,13 +51,31 @@ type family Snd (pair :: (a, b)) :: b where
 
 type GRep a = GRepFromCodeData (DatatypeInfoOf a) (Code a)
 
+gfrom :: forall a x . (GFromToData (SOP.DatatypeInfoOf a) (Code a), SOP.Generic a) => a -> GRep a x
+gfrom = gfromData (Proxy @(SOP.DatatypeInfoOf a)) . unSOP . SOP.from
+
+gto :: forall a x . (GFromToData (SOP.DatatypeInfoOf a) (Code a), SOP.Generic a) => GRep a x -> a
+gto = SOP.to . SOP . gtoData (Proxy @(SOP.DatatypeInfoOf a))
+
+-- | For use with DerivingVia.
+newtype FromSOPGeneric a = FromSOPGeneric a
+
+instance
+  ( GFromToData (SOP.DatatypeInfoOf a) (Code a)
+  , SOP.Generic a
+  ) => GHC.Generic (FromSOPGeneric a) where
+  type Rep (FromSOPGeneric a) = GRep a
+
+  from (FromSOPGeneric a) = gfrom a
+  to a = FromSOPGeneric (gto a)
+
 type family GRepFromCodeData (d :: SOP.T.DatatypeInfo) (xss :: [[Type]]) where
   GRepFromCodeData (SOP.T.ADT m d cs) xss =
     D1 (MetaData d m "" False) (GRepFromCodeSum (ToTree cs) (ToTree xss))
   GRepFromCodeData (SOP.T.Newtype m d c) xss =
     D1 (MetaData d m "" True) (GRepFromCodeSum (ToTree '[c]) (ToTree xss))
 
-type family GRepFromCodeSum (c :: Tree SOP.T.ConstructorInfo) (xs :: Tree [Type]) :: Type -> Type where
+type family GRepFromCodeSum (cs :: Tree SOP.T.ConstructorInfo) (xss :: Tree [Type]) :: Type -> Type where
   GRepFromCodeSum None None                 = V1
   GRepFromCodeSum (One c) (One x)           = GRepFromCodeConstr c x
   GRepFromCodeSum (Join c1 c2) (Join x1 x2) = GRepFromCodeSum c1 x1 :+: GRepFromCodeSum c2 x2
@@ -103,22 +88,16 @@ type family GRepFromCodeConstr (c :: SOP.T.ConstructorInfo) (xs :: [Type]) :: Ty
   GRepFromCodeConstr (SOP.T.Record c fs) xs =
     C1 (MetaCons c PrefixI True) (GRepFromCodeRecord (ToTree fs) (ToTree xs))
 
-type family GRepFromCodeProd (c :: Tree Type) :: Type -> Type where
+type family GRepFromCodeProd (xs :: Tree Type) :: Type -> Type where
   GRepFromCodeProd None         = U1
   GRepFromCodeProd (One c)      = S1 (MetaSel Nothing NoSourceUnpackedness NoSourceStrictness DecidedLazy) (Rec0 c)
   GRepFromCodeProd (Join c1 c2) = GRepFromCodeProd c1 :*: GRepFromCodeProd c2
 
-type family GRepFromCodeRecord (f :: Tree SOP.T.FieldInfo) (xs :: Tree Type) :: Type -> Type where
+type family GRepFromCodeRecord (fs :: Tree SOP.T.FieldInfo) (xs :: Tree Type) :: Type -> Type where
   GRepFromCodeRecord None None = U1
   GRepFromCodeRecord (One ('SOP.T.FieldInfo f)) (One x) =
     S1 (MetaSel (Just f) NoSourceUnpackedness NoSourceStrictness DecidedLazy) (Rec0 x)
   GRepFromCodeRecord (Join f1 f2) (Join x1 x2) = GRepFromCodeRecord f1 x1 :*: GRepFromCodeRecord f2 x2
-
-gfrom :: forall a x . (GFromToData (SOP.DatatypeInfoOf a) (Code a), SOP.Generic a) => a -> GRep a x
-gfrom = gfromData (Proxy @(SOP.DatatypeInfoOf a)) . unSOP . SOP.from
-
-gto :: forall a x . (GFromToData (SOP.DatatypeInfoOf a) (Code a), SOP.Generic a) => GRep a x -> a
-gto = SOP.to . SOP . gtoData (Proxy @(SOP.DatatypeInfoOf a))
 
 class GFromToData (d :: SOP.T.DatatypeInfo) (xss :: [[Type]]) where
   gfromData :: Proxy d -> NS (NP I) xss -> GRepFromCodeData d xss x
@@ -147,8 +126,8 @@ instance GFromToConstr c xs => GFromToSum '[c] '[xs] where
 
 instance
   ( Splittable (x1 : x2 : xs) (x1 : x2 : xs)
-  , Split (x1 : x2 : xs) (x1 : x2 : xs) ~ '(ys, zs)
-  , Split (c1 : c2 : cs) (c1 : c2 : cs) ~ '(ds, es)
+  , Split (x1 : x2 : xs) ~ '(ys, zs)
+  , Split (c1 : c2 : cs) ~ '(ds, es)
   , GFromToSum ds ys
   , GFromToSum es zs
   ) => GFromToSum (c1 : c2 : cs) (x1 : x2 : xs) where
@@ -189,7 +168,7 @@ instance GFromToProd '[x] where
 
 instance
   ( Splittable (x1 : x2 : xs) (x1 : x2 : xs)
-  , Split (x1 : x2 : xs) (x1 : x2 : xs) ~ '(ys, zs)
+  , Split (x1 : x2 : xs) ~ '(ys, zs)
   , GFromToProd ys
   , GFromToProd zs
   ) => GFromToProd (x1 : x2 : xs) where
@@ -213,8 +192,8 @@ instance GFromToRecord '[ 'SOP.T.FieldInfo f] '[x] where
 
 instance
   ( Splittable (x1 : x2 : xs) (x1 : x2 : xs)
-  , Split (x1 : x2 : xs) (x1 : x2 : xs) ~ '(ys, zs)
-  , Split (f1 : f2 : fs) (f1 : f2 : fs) ~ '(ds, es)
+  , Split (x1 : x2 : xs) ~ '(ys, zs)
+  , Split (f1 : f2 : fs) ~ '(ds, es)
   , GFromToRecord ds ys
   , GFromToRecord es zs
   ) => GFromToRecord (f1 : f2 : fs) (x1 : x2 : xs) where
@@ -226,11 +205,11 @@ instance
 
 type PairEta p = p ~ '(Fst p, Snd p)
 
-class (PairEta (Split xs rs)) => Splittable xs rs where
-  splitSum :: (Split xs rs ~ '(ys, zs)) => Proxy rs -> NS f xs -> Either (NS f ys) (NS f zs)
-  joinSum :: (Split xs rs ~ '(ys, zs)) => Proxy rs -> Either (NS f ys) (NS f zs) -> NS f xs
-  splitProd :: (Split xs rs ~ '(ys, zs)) => Proxy rs -> NP f xs -> (NP f ys, NP f zs)
-  joinProd :: (Split xs rs ~ '(ys, zs)) => Proxy rs -> (NP f ys, NP f zs) -> NP f xs
+class (PairEta (SplitAux xs rs)) => Splittable xs rs where
+  splitSum  :: (SplitAux xs rs ~ '(ys, zs)) => Proxy rs -> NS f xs -> Either (NS f ys) (NS f zs)
+  joinSum   :: (SplitAux xs rs ~ '(ys, zs)) => Proxy rs -> Either (NS f ys) (NS f zs) -> NS f xs
+  splitProd :: (SplitAux xs rs ~ '(ys, zs)) => Proxy rs -> NP f xs -> (NP f ys, NP f zs)
+  joinProd  :: (SplitAux xs rs ~ '(ys, zs)) => Proxy rs -> (NP f ys, NP f zs) -> NP f xs
 
 instance Splittable xs rs => Splittable (x : xs) (r1 : r2 : rs) where
   splitSum _ (Z x)  = Left (Z x)
@@ -265,41 +244,3 @@ instance Splittable xs '[] where
   splitProd _ np = (Nil, np)
   joinProd _ (Nil, np) = np
 
-
-
-{-
-instance GFromSum '[] where
-  gfromSum x = case x of {}
-
-instance GFromProd x => GFromSum '[x] where
-  gfromSum (Z x) = gfromProd x
-
-class GFromProd xs where
-  gfromProd :: NP I xs -> GRepFromCodeProd (ToTree xs) x
-
-class SplitSum xs ys where
-  splitSum :: (Split xs ys ~ '(ps, qs)) => NS f xs -> Either (NS f ps) (NS f qs)
--}
-
-{-
-newtype GFromSumType x xss = MkGFromSumType { unGFromSumType :: NS (NP I) xss -> GRepFromCodeSum (ToTree xss) x }
-
-gfromSum :: AsTree (AsTree Top) xss => NS (NP I) xss -> GRepFromCodeSum (ToTree xss) x
-gfromSum = unGFromSumType $
-  viewTree
-    (Proxy @(AsTree Top))
-    (MkGFromSumType (\ x -> case x of {}))
-    (MkGFromSumType (\ (Z x) -> gfromProd x))
-    (\ (MkGFromSumType f1) (MkGFromSumType f2) -> MkGFromSumType (\ x -> _))
-
-splitSum :: (Split xs xs ~ '(ys, zs)) => NS f xs -> Either (NS f ys) (NS f zs)
-splitSum = undefined
-
-splitProduct :: (Split xs xs ~ '(ys, zs)) => NP f xs -> (NP f ys, NP f ys)
-splitProduct = undefined
-
-newtype GFromProdType x xs = MkGFromProdType { unGFromProdType :: NP I xs -> GRepFromCodeProd (ToTree xs) x }
-
-gfromProd :: AsTree Top xs => NP I xs -> GRepFromCodeProd (ToTree xs) x
-gfromProd = _
--}
