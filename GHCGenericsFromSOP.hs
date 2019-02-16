@@ -13,7 +13,7 @@
 {-# LANGUAGE UndecidableInstances #-}
 {-# LANGUAGE UndecidableSuperClasses #-}
 {-# OPTIONS_GHC -Wall -Wno-unticked-promoted-constructors #-}
-module Generics where
+module GHCGenericsFromSOP where
 
 import Data.Kind
 
